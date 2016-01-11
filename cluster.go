@@ -136,17 +136,19 @@ func (c *ClusterClient) randomClient() (client *Client, err error) {
 	return nil, err
 }
 
-func (c *ClusterClient) process(cmd Cmder) {
-	var ask bool
-
+func (c *ClusterClient) getClientForCmd(cmd Cmder) (*Client, int, error) {
 	slot := hashtag.Slot(cmd.clusterKey())
 
 	addr := c.slotMasterAddr(slot)
 	client, err := c.getClient(addr)
 	if err != nil {
-		cmd.setErr(err)
-		return
+		return nil, 0, err
 	}
+	return client, slot, nil
+}
+
+func (c *ClusterClient) executeSlotCmd(client *Client, cmd Cmder, slot int) {
+	var ask bool
 
 	for attempt := 0; attempt <= c.opt.getMaxRedirects(); attempt++ {
 		if attempt > 0 {
@@ -195,6 +197,47 @@ func (c *ClusterClient) process(cmd Cmder) {
 
 		break
 	}
+}
+
+func (c *ClusterClient) executeSlotlessCmd(client *Client, cmd Cmder) error {
+	for attempt := 0; attempt <= c.opt.getMaxRedirects(); attempt++ {
+		if attempt > 0 {
+			cmd.reset()
+			// exponential backoff
+			time.Sleep(time.Microsecond << uint(attempt))
+		}
+
+		client.Process(cmd)
+		err := cmd.Err()
+
+		// maybe don't need TxFailedErr or Nil here
+		if err == nil || err == Nil || err == TxFailedErr {
+			return nil
+		}
+	}
+	return cmd.Err()
+}
+
+func (c *ClusterClient) process(cmd Cmder) {
+	switch cmd.args()[0].(string) {
+	case "FLUSHALL", "FLUSHDB":
+		for _, client := range c.clients {
+			err := c.executeSlotlessCmd(client, cmd)
+			if err != nil {
+				break
+			}
+		}
+		return
+	}
+
+	client, slot, err := c.getClientForCmd(cmd)
+	if err != nil {
+		cmd.setErr(err)
+		return
+	}
+
+	c.executeSlotCmd(client, cmd, slot)
+
 }
 
 // Closes all clients and returns last error if there are any.
